@@ -1,5 +1,6 @@
 package com.example.ez_sign_writer_app
 
+import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -7,6 +8,7 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.IsoDep
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.util.Log
 import android.widget.Button
 import android.widget.CheckBox
@@ -28,15 +30,20 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     private lateinit var statusText: TextView
     private var nfcAdapter: NfcAdapter? = null
+    private var selectedBitmap: Bitmap? = null
+    private var selectedImageName: String? = null
+    private var imageValidationError: String? = null
     private var sourceBitmap: Bitmap? = null
     @Volatile
     private var rawModeEnabled: Boolean = false
     // 画像選択ピッカー
     private val pickMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            val inputStream = contentResolver.openInputStream(uri)
-            sourceBitmap = BitmapFactory.decodeStream(inputStream)
-            updateStatus("Image Ready...Please hold your device over the NFC e-paper display.")
+            selectedBitmap = contentResolver.openInputStream(uri)?.use { inputStream ->
+                BitmapFactory.decodeStream(inputStream)
+            }
+            selectedImageName = getDisplayName(uri)
+            validateSelectedImage()
         }
     }
 
@@ -64,6 +71,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             text = "rawモード"
             setOnCheckedChangeListener { _, isChecked ->
                 rawModeEnabled = isChecked
+                validateSelectedImage()
             }
         }
         statusText = TextView(this).apply {
@@ -98,7 +106,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     override fun onTagDiscovered(tag: Tag) {
         // 画像選択前にタグ検知した場合は処理しない
         val bitmap = sourceBitmap ?: run {
-            updateStatus("Please select an image.")
+            updateStatus(imageValidationError ?: "Please select an image.")
             return
         }
 
@@ -162,6 +170,39 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun hexToBytes(s: String) = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02X".format(it) }
 
+    private fun validateSelectedImage() {
+        val bitmap = selectedBitmap ?: run {
+            sourceBitmap = null
+            imageValidationError = null
+            updateStatus("Please select an image.")
+            return
+        }
+
+        val imageName = selectedImageName ?: "selected image"
+        if (rawModeEnabled && (bitmap.width != ImageConverter.WIDTH || bitmap.height != ImageConverter.HEIGHT)) {
+            sourceBitmap = null
+            imageValidationError =
+                "Raw mode error: $imageName is ${bitmap.width}x${bitmap.height}px. Required: ${ImageConverter.WIDTH}x${ImageConverter.HEIGHT}px."
+            updateStatus(imageValidationError!!)
+            return
+        }
+
+        sourceBitmap = bitmap
+        imageValidationError = null
+        updateStatus("Image Ready: $imageName\nPlease hold your device over the NFC e-paper display.")
+    }
+
+    private fun getDisplayName(uri: Uri): String {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) {
+                return cursor.getString(nameIndex)
+            }
+        }
+
+        return uri.lastPathSegment ?: uri.toString()
+    }
+
     // NFC送信用コマンドパケット作成
     private fun createF0D3Commands(blockNo: Int, data: ByteArray): List<ByteArray> {
         val list = mutableListOf<ByteArray>()
@@ -182,8 +223,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 }
 
 object ImageConverter {
-    private const val WIDTH = 400
-    private const val HEIGHT = 300
+    const val WIDTH = 400
+    const val HEIGHT = 300
     private const val COLOR_THRESHOLD = 128
 
     // 0:黒, 1:白, 2:黄, 3:赤
