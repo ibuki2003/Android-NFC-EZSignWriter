@@ -15,6 +15,8 @@ import android.widget.TextView
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import org.anarres.lzo.LzoLibrary
 import org.anarres.lzo.lzo_uintp
 import kotlin.math.pow
@@ -44,7 +46,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // レイアウト生成
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(50, 100, 50, 50)
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(layout) { view, insets ->
+            val safeArea = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(50 + safeArea.left, 50 + safeArea.top, 50 + safeArea.right, 50 + safeArea.bottom)
+            insets
         }
         val btn = Button(this).apply {
             text = "画像を選択"
