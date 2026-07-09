@@ -9,6 +9,7 @@ import android.nfc.tech.IsoDep
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.PickVisualMediaRequest
@@ -26,6 +27,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private lateinit var statusText: TextView
     private var nfcAdapter: NfcAdapter? = null
     private var sourceBitmap: Bitmap? = null
+    @Volatile
+    private var rawModeEnabled: Boolean = false
     // 画像選択ピッカー
     private val pickMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
@@ -49,6 +52,12 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
         }
+        val rawModeCheckBox = CheckBox(this).apply {
+            text = "rawモード"
+            setOnCheckedChangeListener { _, isChecked ->
+                rawModeEnabled = isChecked
+            }
+        }
         statusText = TextView(this).apply {
             text = "Please select an image."
             textSize = 18f
@@ -56,6 +65,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
 
         layout.addView(btn)
+        layout.addView(rawModeCheckBox)
         layout.addView(statusText)
         setContentView(layout)
 
@@ -97,7 +107,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             if (!hex(authRes).endsWith("9000")) throw Exception("Authentication Failed.")
 
             // 画像データのブロック変換と送信
-            val rawBlocks = ImageConverter.convertToRawBlocks(bitmap)
+            val rawBlocks = ImageConverter.convertToRawBlocks(bitmap, rawModeEnabled)
             for (blockNo in 0 until 15) {
                 updateStatus("Send: Block $blockNo / 14")
 
@@ -164,28 +174,34 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 }
 
 object ImageConverter {
+    private const val WIDTH = 400
+    private const val HEIGHT = 300
+    private const val COLOR_THRESHOLD = 128
+
     // 0:黒, 1:白, 2:黄, 3:赤
     private val PALETTE_R = floatArrayOf(0.0f, 1.0f, 1.0f, 1.0f)
     private val PALETTE_G = floatArrayOf(0.0f, 1.0f, 1.0f, 0.0f)
     private val PALETTE_B = floatArrayOf(0.0f, 1.0f, 0.0f, 0.0f)
 
     // 画像データのブロック変換
-    fun convertToRawBlocks(source: Bitmap): List<ByteArray> {
-        val width = 400
-        val height = 300
-        val pixelCount = width * height
+    fun convertToRawBlocks(source: Bitmap, rawMode: Boolean): List<ByteArray> {
+        if (rawMode) {
+            return convertRawImageToBlocks(source)
+        }
+
+        val pixelCount = WIDTH * HEIGHT
 
         // リサイズ
-        val scaledBitmap = resizeToFill(source, width, height)
+        val scaledBitmap = resizeToFill(source, WIDTH, HEIGHT)
 
         // 正規化とRGBチャンネル分解
         val bufR = FloatArray(pixelCount)
         val bufG = FloatArray(pixelCount)
         val bufB = FloatArray(pixelCount)
-        for (y in 0 until height) {
-            for (x in 0 until width) {
+        for (y in 0 until HEIGHT) {
+            for (x in 0 until WIDTH) {
                 val px = scaledBitmap[x, y]
-                val idx = y * width + x
+                val idx = y * WIDTH + x
                 bufR[idx] = Color.red(px) / 255.0f
                 bufG[idx] = Color.green(px) / 255.0f
                 bufB[idx] = Color.blue(px) / 255.0f
@@ -203,9 +219,9 @@ object ImageConverter {
         // ディザリング(Atkinson Dithering)
         val indexMap = IntArray(pixelCount)
         val saturationWeights = floatArrayOf(0.0f, 0.0f, 1.1f, 0.5f) // 各色の優先度
-        for (y in 0 until height) {
-            val rowBase = y * width
-            for (x in 0 until width) {
+        for (y in 0 until HEIGHT) {
+            val rowBase = y * WIDTH
+            for (x in 0 until WIDTH) {
                 val index = rowBase + x
 
                 val cr = bufR[index]
@@ -246,18 +262,46 @@ object ImageConverter {
                 // 誤差拡散の計算
                 val thresholds = 0.02f  // 誤差許容閾値
                 if (abs(er) > thresholds || abs(eg) > thresholds || abs(eb) > thresholds) {
-                    diffuse(x + 1, y, er, eg, eb, bufR, bufG, bufB, width, height)
-                    diffuse(x + 2, y, er, eg, eb, bufR, bufG, bufB, width, height)
-                    diffuse(x - 1, y + 1, er, eg, eb, bufR, bufG, bufB, width, height)
-                    diffuse(x, y + 1, er, eg, eb, bufR, bufG, bufB, width, height)
-                    diffuse(x + 1, y + 1, er, eg, eb, bufR, bufG, bufB, width, height)
-                    diffuse(x, y + 2, er, eg, eb, bufR, bufG, bufB, width, height)
+                    diffuse(x + 1, y, er, eg, eb, bufR, bufG, bufB, WIDTH, HEIGHT)
+                    diffuse(x + 2, y, er, eg, eb, bufR, bufG, bufB, WIDTH, HEIGHT)
+                    diffuse(x - 1, y + 1, er, eg, eb, bufR, bufG, bufB, WIDTH, HEIGHT)
+                    diffuse(x, y + 1, er, eg, eb, bufR, bufG, bufB, WIDTH, HEIGHT)
+                    diffuse(x + 1, y + 1, er, eg, eb, bufR, bufG, bufB, WIDTH, HEIGHT)
+                    diffuse(x, y + 2, er, eg, eb, bufR, bufG, bufB, WIDTH, HEIGHT)
                 }
             }
         }
 
         // データパッキングとブロック分割
-        return packToIndexBlocks(indexMap, width, height)
+        return packToIndexBlocks(indexMap, WIDTH, HEIGHT)
+    }
+
+    private fun convertRawImageToBlocks(source: Bitmap): List<ByteArray> {
+        if (source.width != WIDTH || source.height != HEIGHT) {
+            throw IllegalArgumentException("Raw mode requires ${WIDTH}x${HEIGHT}px image. Selected: ${source.width}x${source.height}px.")
+        }
+
+        val indexMap = IntArray(WIDTH * HEIGHT)
+        for (y in 0 until HEIGHT) {
+            for (x in 0 until WIDTH) {
+                indexMap[y * WIDTH + x] = classifyFixedThreshold(source[x, y])
+            }
+        }
+
+        return packToIndexBlocks(indexMap, WIDTH, HEIGHT)
+    }
+
+    private fun classifyFixedThreshold(pixel: Int): Int {
+        val r = Color.red(pixel) >= COLOR_THRESHOLD
+        val g = Color.green(pixel) >= COLOR_THRESHOLD
+        val b = Color.blue(pixel) >= COLOR_THRESHOLD
+
+        return when {
+            r && g && b -> 1 // 白
+            r && g -> 2 // 黄
+            r -> 3 // 赤
+            else -> 0 // 黒
+        }
     }
 
     // リサイズ
@@ -327,4 +371,3 @@ object LzoService {
         return out.copyOfRange(0, len.value)
     }
 }
-
