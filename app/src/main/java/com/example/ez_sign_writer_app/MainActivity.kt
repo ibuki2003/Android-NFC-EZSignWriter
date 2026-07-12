@@ -4,6 +4,7 @@ import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.IsoDep
@@ -12,8 +13,12 @@ import android.provider.OpenableColumns
 import android.util.Log
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.GridLayout
 import android.widget.LinearLayout
+import android.widget.RadioButton
 import android.widget.TextView
+import android.text.InputType
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -24,7 +29,15 @@ import org.anarres.lzo.lzo_uintp
 import kotlin.math.pow
 import androidx.core.graphics.get
 import androidx.core.graphics.scale
+import androidx.core.widget.doAfterTextChanged
 import kotlin.math.abs
+
+enum class ImageRotation(val degrees: Int, val displayName: String) {
+    NONE(0, "0°（現在の向き）"),
+    CLOCKWISE_90(90, "右90°"),
+    ROTATE_180(180, "180°"),
+    COUNTERCLOCKWISE_90(270, "左90°"),
+}
 
 class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
@@ -36,6 +49,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private var sourceBitmap: Bitmap? = null
     @Volatile
     private var rawModeEnabled: Boolean = false
+    @Volatile
+    private var imageRotation: ImageRotation = ImageRotation.NONE
+    @Volatile
+    private var rawScale: Int = 1
+    private var rawScaleInputValid: Boolean = true
     // 画像選択ピッカー
     private val pickMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
@@ -67,11 +85,86 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
         }
+        val rotationLabel = TextView(this).apply {
+            text = "画像の回転"
+        }
+        val rotationGrid = GridLayout(this).apply {
+            columnCount = 2
+        }
+        val rotationButtons = ImageRotation.entries.map { rotation ->
+            RadioButton(this).apply {
+                text = rotation.displayName
+                isChecked = rotation == ImageRotation.NONE
+                setOnCheckedChangeListener { _, isChecked ->
+                    if (isChecked) {
+                        imageRotation = rotation
+                        validateSelectedImage()
+                    }
+                }
+            }
+        }
+        rotationButtons.forEach { button ->
+            button.setOnClickListener {
+                rotationButtons.forEach { it.isChecked = it === button }
+            }
+            rotationGrid.addView(button)
+        }
         val rawModeCheckBox = CheckBox(this).apply {
             text = "rawモード"
-            setOnCheckedChangeListener { _, isChecked ->
-                rawModeEnabled = isChecked
-                validateSelectedImage()
+        }
+        val scaleLabel = TextView(this).apply {
+            text = "raw倍率（整数倍・pixel perfect）"
+        }
+        val scaleControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val actualSizeButton = Button(this).apply { text = "等倍" }
+        val scaleDownButton = Button(this).apply { text = "−" }
+        val scaleInput = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText("1")
+            selectAll()
+            contentDescription = "raw画像の倍率"
+        }
+        val scaleUpButton = Button(this).apply { text = "＋" }
+        val maxScaleButton = Button(this).apply { text = "最大" }
+        scaleControls.addView(actualSizeButton)
+        scaleControls.addView(scaleDownButton)
+        scaleControls.addView(scaleInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        scaleControls.addView(scaleUpButton)
+        scaleControls.addView(maxScaleButton)
+
+        fun setScale(value: Int) {
+            scaleInput.setText(value.toString())
+            scaleInput.selectAll()
+        }
+        fun updateScaleControls() {
+            val enabled = rawModeEnabled
+            scaleLabel.isEnabled = enabled
+            actualSizeButton.isEnabled = enabled
+            scaleDownButton.isEnabled = enabled && rawScaleInputValid && rawScale > 1
+            scaleInput.isEnabled = enabled
+            scaleUpButton.isEnabled = enabled && rawScaleInputValid && rawScale < Int.MAX_VALUE
+            maxScaleButton.isEnabled = enabled
+        }
+        rawModeCheckBox.setOnCheckedChangeListener { _, isChecked ->
+            rawModeEnabled = isChecked
+            updateScaleControls()
+            validateSelectedImage()
+        }
+        scaleInput.doAfterTextChanged { text ->
+            val value = text?.toString()?.toIntOrNull()
+            rawScaleInputValid = value != null && value >= 1
+            if (rawScaleInputValid) rawScale = value!!
+            updateScaleControls()
+            validateSelectedImage()
+        }
+        actualSizeButton.setOnClickListener { setScale(1) }
+        scaleDownButton.setOnClickListener { setScale(rawScale - 1) }
+        scaleUpButton.setOnClickListener { setScale(rawScale + 1) }
+        maxScaleButton.setOnClickListener {
+            selectedBitmap?.let { bitmap ->
+                ImageConverter.maxRawScale(bitmap, imageRotation).takeIf { it >= 1 }?.let(::setScale)
             }
         }
         statusText = TextView(this).apply {
@@ -81,9 +174,15 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
 
         layout.addView(btn)
+        layout.addView(rotationLabel)
+        layout.addView(rotationGrid)
         layout.addView(rawModeCheckBox)
+        layout.addView(scaleLabel)
+        layout.addView(scaleControls)
         layout.addView(statusText)
         setContentView(layout)
+
+        updateScaleControls()
 
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
     }
@@ -123,7 +222,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             if (!hex(authRes).endsWith("9000")) throw Exception("Authentication Failed.")
 
             // 画像データのブロック変換と送信
-            val rawBlocks = ImageConverter.convertToRawBlocks(bitmap, rawModeEnabled)
+            val rawBlocks = ImageConverter.convertToRawBlocks(bitmap, rawModeEnabled, imageRotation, rawScale)
             for (blockNo in 0 until 15) {
                 updateStatus("Send: Block $blockNo / 14")
 
@@ -179,17 +278,30 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
 
         val imageName = selectedImageName ?: "selected image"
-        if (rawModeEnabled && (bitmap.width != ImageConverter.WIDTH || bitmap.height != ImageConverter.HEIGHT)) {
+        if (rawModeEnabled && !rawScaleInputValid) {
             sourceBitmap = null
-            imageValidationError =
-                "Raw mode error: $imageName is ${bitmap.width}x${bitmap.height}px. Required: ${ImageConverter.WIDTH}x${ImageConverter.HEIGHT}px."
+            imageValidationError = "Raw mode error: 倍率は1以上の整数で入力してください。"
             updateStatus(imageValidationError!!)
             return
+        }
+        if (rawModeEnabled) {
+            val error = ImageConverter.rawSizeError(bitmap, imageRotation, rawScale)
+            if (error != null) {
+                sourceBitmap = null
+                imageValidationError = error
+                updateStatus(error)
+                return
+            }
         }
 
         sourceBitmap = bitmap
         imageValidationError = null
-        updateStatus("Image Ready: $imageName\nPlease hold your device over the NFC e-paper display.")
+        val transformation = if (rawModeEnabled) {
+            "${imageRotation.displayName}・${rawScale}x・中央配置"
+        } else {
+            imageRotation.displayName
+        }
+        updateStatus("Image Ready: $imageName\n変換: $transformation\nPlease hold your device over the NFC e-paper display.")
     }
 
     private fun getDisplayName(uri: Uri): String {
@@ -233,15 +345,22 @@ object ImageConverter {
     private val PALETTE_B = floatArrayOf(0.0f, 1.0f, 0.0f, 0.0f)
 
     // 画像データのブロック変換
-    fun convertToRawBlocks(source: Bitmap, rawMode: Boolean): List<ByteArray> {
+    fun convertToRawBlocks(
+        source: Bitmap,
+        rawMode: Boolean,
+        rotation: ImageRotation = ImageRotation.NONE,
+        rawScale: Int = 1,
+    ): List<ByteArray> {
+        val orientedSource = rotate(source, rotation.degrees)
+
         if (rawMode) {
-            return convertRawImageToBlocks(source)
+            return convertRawImageToBlocks(prepareRawImage(orientedSource, rawScale))
         }
 
         val pixelCount = WIDTH * HEIGHT
 
         // リサイズ
-        val scaledBitmap = resizeToFill(source, WIDTH, HEIGHT)
+        val scaledBitmap = resizeToFill(orientedSource, WIDTH, HEIGHT)
 
         // 正規化とRGBチャンネル分解
         val bufR = FloatArray(pixelCount)
@@ -325,6 +444,40 @@ object ImageConverter {
         return packToIndexBlocks(indexMap, WIDTH, HEIGHT)
     }
 
+    fun maxRawScale(source: Bitmap, rotation: ImageRotation): Int {
+        val (width, height) = rotatedDimensions(source, rotation)
+        return minOf(WIDTH / width, HEIGHT / height)
+    }
+
+    fun rawSizeError(source: Bitmap, rotation: ImageRotation, scale: Int): String? {
+        require(scale >= 1) { "Scale must be at least 1." }
+        val (width, height) = rotatedDimensions(source, rotation)
+        val scaledWidth = width.toLong() * scale
+        val scaledHeight = height.toLong() * scale
+        if (scaledWidth <= WIDTH && scaledHeight <= HEIGHT) return null
+
+        return "Raw mode error: ${rotation.displayName}・${scale}xでは${scaledWidth}x${scaledHeight}pxです。${WIDTH}x${HEIGHT}px以内に収めてください。"
+    }
+
+    private fun rotatedDimensions(source: Bitmap, rotation: ImageRotation): Pair<Int, Int> =
+        if (rotation == ImageRotation.CLOCKWISE_90 || rotation == ImageRotation.COUNTERCLOCKWISE_90) {
+            source.height to source.width
+        } else {
+            source.width to source.height
+        }
+
+    private fun prepareRawImage(source: Bitmap, scale: Int): Bitmap {
+        rawSizeError(source, ImageRotation.NONE, scale)?.let { throw IllegalArgumentException(it) }
+        val scaledWidth = source.width * scale
+        val scaledHeight = source.height * scale
+        val scaled = if (scale == 1) source else source.scale(scaledWidth, scaledHeight, false)
+        val result = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(result)
+        canvas.drawColor(Color.WHITE)
+        canvas.drawBitmap(scaled, ((WIDTH - scaledWidth) / 2).toFloat(), ((HEIGHT - scaledHeight) / 2).toFloat(), null)
+        return result
+    }
+
     private fun convertRawImageToBlocks(source: Bitmap): List<ByteArray> {
         if (source.width != WIDTH || source.height != HEIGHT) {
             throw IllegalArgumentException("Raw mode requires ${WIDTH}x${HEIGHT}px image. Selected: ${source.width}x${source.height}px.")
@@ -351,6 +504,13 @@ object ImageConverter {
             r -> 3 // 赤
             else -> 0 // 黒
         }
+    }
+
+    private fun rotate(source: Bitmap, degrees: Int): Bitmap {
+        if (degrees % 360 == 0) return source
+
+        val matrix = Matrix().apply { postRotate((degrees % 360).toFloat()) }
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, false)
     }
 
     // リサイズ
