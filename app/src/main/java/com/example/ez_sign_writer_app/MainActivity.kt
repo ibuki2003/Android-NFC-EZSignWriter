@@ -1,5 +1,6 @@
 package com.example.ez_sign_writer_app
 
+import android.content.Intent
 import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -57,11 +58,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     // 画像選択ピッカー
     private val pickMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            selectedBitmap = contentResolver.openInputStream(uri)?.use { inputStream ->
-                BitmapFactory.decodeStream(inputStream)
-            }
-            selectedImageName = getDisplayName(uri)
-            validateSelectedImage()
+            loadSelectedImage(uri)
         }
     }
 
@@ -185,6 +182,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         updateScaleControls()
 
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+        handleSharedImage(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleSharedImage(intent)
     }
 
     override fun onResume() {
@@ -302,6 +306,44 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             imageRotation.displayName
         }
         updateStatus("Image Ready: $imageName\n変換: $transformation\nPlease hold your device over the NFC e-paper display.")
+    }
+
+    private fun handleSharedImage(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+
+        val uri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+        if (uri == null) {
+            clearSelectedImage("共有された画像を読み込めませんでした。")
+            return
+        }
+
+        loadSelectedImage(uri)
+    }
+
+    private fun loadSelectedImage(uri: Uri) {
+        try {
+            val bitmap = contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream)
+            if (bitmap == null) {
+                clearSelectedImage("画像を読み込めませんでした。")
+                return
+            }
+
+            selectedBitmap = bitmap
+            selectedImageName = getDisplayName(uri)
+            validateSelectedImage()
+        } catch (e: Exception) {
+            Log.e("Image", "Failed to load image", e)
+            clearSelectedImage("画像を読み込めませんでした。")
+        }
+    }
+
+    private fun clearSelectedImage(message: String) {
+        selectedBitmap = null
+        selectedImageName = null
+        sourceBitmap = null
+        imageValidationError = message
+        updateStatus(message)
     }
 
     private fun getDisplayName(uri: Uri): String {
